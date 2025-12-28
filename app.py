@@ -221,11 +221,25 @@ def image_understanding(image: Image.Image, prompt: str, show_thinking=False,
 
 
 # Image Editing function with thinking option and hyperparameters
-def edit_image(image: Image.Image, prompt: str, show_thinking=False, cfg_text_scale=4.0, 
-              cfg_img_scale=2.0, cfg_interval=0.0, 
-              timestep_shift=3.0, num_timesteps=50, cfg_renorm_min=0.0, 
-              cfg_renorm_type="text_channel", max_think_token_n=1024, 
-              do_sample=False, text_temperature=0.3, seed=0):
+def edit_image(
+    image: Image.Image,
+    prompt: str,
+    show_thinking=False,
+    cfg_text_scale=4.0,
+    cfg_img_scale=2.0,
+    cfg_interval=0.0,
+    timestep_shift=3.0,
+    num_timesteps=50,
+    cfg_renorm_min=0.0,
+    cfg_renorm_type="text_channel",
+    max_think_token_n=1024,
+    do_sample=False,
+    text_temperature=0.3,
+    seed=0,
+    edit_source: str = "",
+    edit_target: str = "",
+    edit_scale: float = 0.0,
+):
     # Set seed for reproducibility
     set_seed(seed)
     
@@ -249,6 +263,9 @@ def edit_image(image: Image.Image, prompt: str, show_thinking=False, cfg_text_sc
         num_timesteps=num_timesteps,
         cfg_renorm_min=cfg_renorm_min,
         cfg_renorm_type=cfg_renorm_type,
+        edit_source=edit_source.strip() or None,
+        edit_target=edit_target.strip() or None,
+        edit_scale=edit_scale,
     )
     
     # Include thinking parameter based on user choice
@@ -368,6 +385,22 @@ with gr.Blocks() as demo:
                     label="Prompt",
                     value="She boards a modern subway, quietly reading a folded newspaper, wearing the same clothes."
                 )
+                edit_source = gr.Textbox(
+                    label="Edit Source",
+                    placeholder="e.g., red car",
+                )
+                edit_target = gr.Textbox(
+                    label="Edit Target",
+                    placeholder="e.g., blue car",
+                )
+                edit_scale = gr.Slider(
+                    minimum=0.0,
+                    maximum=10.0,
+                    value=0.0,
+                    step=0.1,
+                    interactive=True,
+                    label="Edit Scale",
+                )
             
             with gr.Column(scale=1):
                 edit_image_output = gr.Image(label="Result")
@@ -432,12 +465,13 @@ with gr.Blocks() as demo:
                               cfg_img_scale, cfg_interval, 
                               timestep_shift, num_timesteps, cfg_renorm_min, 
                               cfg_renorm_type, max_think_token_n, do_sample, 
-                              text_temperature, seed):
+                              text_temperature, seed, edit_source, edit_target, edit_scale):
             edited_image, thinking = edit_image(
                 image, prompt, show_thinking, cfg_text_scale, cfg_img_scale, 
                 cfg_interval, timestep_shift, 
                 num_timesteps, cfg_renorm_min, cfg_renorm_type,
-                max_think_token_n, do_sample, text_temperature, seed
+                max_think_token_n, do_sample, text_temperature, seed,
+                edit_source, edit_target, edit_scale,
             )
             
             return edited_image, thinking if thinking else ""
@@ -450,7 +484,8 @@ with gr.Blocks() as demo:
                 edit_cfg_text_scale, edit_cfg_img_scale, edit_cfg_interval,
                 edit_timestep_shift, edit_num_timesteps, 
                 edit_cfg_renorm_min, edit_cfg_renorm_type,
-                edit_max_think_token_n, edit_do_sample, edit_text_temperature, edit_seed
+                edit_max_think_token_n, edit_do_sample, edit_text_temperature, edit_seed,
+                edit_source, edit_target, edit_scale,
             ],
             outputs=[edit_image_output, edit_thinking_output]
         )

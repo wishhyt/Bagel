@@ -373,6 +373,8 @@ class Bagel(PreTrainedModel):
         packed_indexes: torch.LongTensor,
         packed_key_value_indexes: torch.LongTensor,
         key_values_lens: torch.IntTensor,
+        edit_delta: Optional[torch.Tensor] = None,
+        edit_scale: float = 0.0,
     ):
         packed_text_embedding = self.language_model.model.embed_tokens(packed_text_ids)
         packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
@@ -387,6 +389,12 @@ class Bagel(PreTrainedModel):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
+        if edit_delta is not None and edit_scale > 0:
+            edit_delta = edit_delta.to(
+                device=packed_vit_token_embed.device,
+                dtype=packed_vit_token_embed.dtype,
+            )
+            packed_vit_token_embed = packed_vit_token_embed + edit_scale * edit_delta.unsqueeze(0)
         packed_vit_token_embed = self.connector(packed_vit_token_embed)
         pos_emb = self.vit_pos_embed(packed_vit_position_ids)
         packed_vit_token_embed = packed_vit_token_embed + pos_emb
