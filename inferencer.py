@@ -6,9 +6,11 @@ from typing import List, Dict, Optional, Union, Any
 
 from PIL import Image
 import torch
+import torch.nn.functional as F
 
 from data.data_utils import pil_img2rgb
 from modeling.bagel.qwen2_navit import NaiveCache
+from modeling.siglip import SiglipTextModel, SiglipTokenizer
 
 
 
@@ -19,14 +21,68 @@ GEN_THINK_SYSTEM_PROMPT = '''You should first think about the planning process i
 The planning process is enclosed within <think> </think> tags, i.e. <think> planning process here </think> image here'''
 
 
+class TextDeltaCalculator:
+    def __init__(self, vit_config, device, dtype, model_name_or_path: Optional[str] = None):
+        self.vit_config = vit_config
+        self.device = device
+        self.dtype = dtype
+        self.model_name_or_path = model_name_or_path or self._resolve_model_name()
+        self.tokenizer = SiglipTokenizer.from_pretrained(self.model_name_or_path)
+        self.text_model = SiglipTextModel.from_pretrained(self.model_name_or_path).eval().to(self.device)
+
+    def _resolve_model_name(self) -> str:
+        if getattr(self.vit_config, "model_type", None) != "siglip_vision_model":
+            raise NotImplementedError("Text delta calculator currently supports SigLIP vision towers only.")
+
+        for attr in ("name_or_path", "_name_or_path", "model_name_or_path"):
+            value = getattr(self.vit_config, attr, None)
+            if value:
+                return value
+
+        raise ValueError("Unable to resolve the vision tower model name for loading the SigLIP text encoder.")
+
+    @torch.no_grad()
+    def compute_delta(self, source_text: str, target_text: str) -> torch.Tensor:
+        tokenized = self.tokenizer([source_text, target_text], padding=True, return_tensors="pt")
+        tokenized = {key: value.to(self.device) for key, value in tokenized.items()}
+        outputs = self.text_model(**tokenized)
+        pooled = outputs.pooler_output.to(dtype=self.dtype)
+        pooled = F.normalize(pooled, p=2, dim=-1)
+        delta = pooled[1] - pooled[0]
+        delta = F.normalize(delta, p=2, dim=-1)
+        return delta
+
+
 class InterleaveInferencer:
-    def __init__(self, model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids):
+    def __init__(
+        self,
+        model,
+        vae_model,
+        tokenizer,
+        vae_transform,
+        vit_transform,
+        new_token_ids,
+        text_encoder_name_or_path: Optional[str] = None,
+    ):
         self.model = model
         self.vae_model = vae_model
         self.tokenizer = tokenizer
         self.vae_transform = vae_transform
         self.vit_transform = vit_transform
         self.new_token_ids = new_token_ids
+        self.text_encoder_name_or_path = text_encoder_name_or_path
+        self._text_delta_calculator = None
+
+    def _get_text_delta_calculator(self) -> TextDeltaCalculator:
+        if self._text_delta_calculator is None:
+            vit_param = next(self.model.vit_model.parameters())
+            self._text_delta_calculator = TextDeltaCalculator(
+                self.model.config.vit_config,
+                device=vit_param.device,
+                dtype=vit_param.dtype,
+                model_name_or_path=self.text_encoder_name_or_path,
+            )
+        return self._text_delta_calculator
         
     def init_gen_context(self): 
         gen_context = {
@@ -59,13 +115,25 @@ class InterleaveInferencer:
         return gen_context
 
     @torch.no_grad()
-    def update_context_image(self, image, gen_context, vae=True, vit=True):
+    def update_context_image(
+        self,
+        image,
+        gen_context,
+        vae=True,
+        vit=True,
+        edit_source: Optional[str] = None,
+        edit_target: Optional[str] = None,
+        edit_scale: float = 0.0,
+    ):
         # used for interleave data, currently only support 1 data inference, 
 
         assert vae or vit
         past_key_values = gen_context['past_key_values']
         kv_lens = gen_context['kv_lens']
         ropes =  gen_context['ropes']
+        edit_delta = None
+        if edit_scale > 0 and edit_source and edit_target:
+            edit_delta = self._get_text_delta_calculator().compute_delta(edit_source, edit_target)
 
         if vae:
             ## update vae
@@ -87,7 +155,12 @@ class InterleaveInferencer:
                 transforms=self.vit_transform, 
                 new_token_ids=self.new_token_ids,
             )
-            past_key_values = self.model.forward_cache_update_vit(past_key_values, **generation_input)
+            past_key_values = self.model.forward_cache_update_vit(
+                past_key_values,
+                edit_delta=edit_delta,
+                edit_scale=edit_scale,
+                **generation_input,
+            )
 
         gen_context['kv_lens'] = kv_lens
         gen_context['ropes'] = ropes
@@ -223,6 +296,9 @@ class InterleaveInferencer:
         cfg_renorm_type="global",
         image_shapes=(1024, 1024),
         enable_taylorseer=False,
+        edit_source: Optional[str] = None,
+        edit_target: Optional[str] = None,
+        edit_scale: float = 0.0,
     ) -> List[Union[str, Image.Image]]:
 
         output_list = []
@@ -247,7 +323,14 @@ class InterleaveInferencer:
 
                 elif isinstance(input_term, Image.Image):
                     input_term = self.vae_transform.resize_transform(pil_img2rgb(input_term))
-                    gen_context = self.update_context_image(input_term, gen_context, vae=not understanding_output)
+                    gen_context = self.update_context_image(
+                        input_term,
+                        gen_context,
+                        vae=not understanding_output,
+                        edit_source=edit_source,
+                        edit_target=edit_target,
+                        edit_scale=edit_scale,
+                    )
 
                     image_shapes = input_term.size[::-1]
                     cfg_text_context = deepcopy(gen_context)
